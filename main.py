@@ -145,11 +145,12 @@ MODEL_CONFIGS = [
         "name": "baseline_4954",
         "use_clinic_id": True,
         "add_hour_bucket": False,
-        "iterations": 2000,
+        "iterations": 3000,
+        "od_wait": 300,
         "learning_rate": 0.03,
-        "depth": 6,
-        "l2_leaf_reg": 10,
-        "min_data_in_leaf": 40,
+        "depth": 7,
+        "l2_leaf_reg": 5,
+        "min_data_in_leaf": 20,
     },
     {
         "name": "regularized_off",
@@ -201,7 +202,7 @@ def train_and_eval_one(train_base, cfg):
         devices="0",
         random_seed=RANDOM_SEED,
         od_type="Iter",
-        od_wait=200,
+        od_wait=cfg.get("od_wait", 200),
         verbose=200,
         allow_writing_files=False
     )
