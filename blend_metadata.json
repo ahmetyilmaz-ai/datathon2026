@@ -1,23 +1,23 @@
 {
-  "stacker_all_oof_ap": 0.48950328203830495,
-  "stacker_no_clinic_oof_ap": 0.4892690090298867,
+  "stacker_all_oof_ap": 0.48952758823563347,
+  "stacker_no_clinic_oof_ap": 0.48977441613086464,
   "stacker_all_coefficients": {
-    "pred_clinic_aware": 2.596283470006992,
-    "pred_clinic_agnostic": 2.651736619697738
+    "pred_clinic_aware": 2.617024345562974,
+    "pred_clinic_agnostic": 2.630923634189434
   },
   "stacker_no_clinic_coefficients": {
-    "pred_clinic_agnostic": 5.2164109068555184
+    "pred_clinic_agnostic": 5.228304753185864
   },
   "model_artifacts": {
     "clinic_aware": {
-      "median_best_iter": 326,
-      "oof_ap": 0.4892447466284193,
-      "fold_ap_mean": 0.48962479118931757
+      "median_best_iter": 740,
+      "oof_ap": 0.48896356107499833,
+      "fold_ap_mean": 0.489374431575233
     },
     "clinic_agnostic": {
-      "median_best_iter": 396,
-      "oof_ap": 0.4892690090298867,
-      "fold_ap_mean": 0.4896854936762185
+      "median_best_iter": 754,
+      "oof_ap": 0.48977441613086464,
+      "fold_ap_mean": 0.49021516641828594
     }
   }
 }
