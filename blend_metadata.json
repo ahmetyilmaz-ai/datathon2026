@@ -1,0 +1,37 @@
+{
+  "stacker_all_oof_ap": 0.4898410753072053,
+  "stacker_no_clinic_oof_ap": 0.48980107409307505,
+  "stacker_all_coefficients": {
+    "pred_clinic_aware": 2.602588555929937,
+    "pred_clinic_agnostic": 2.6391174876158403,
+    "pred_hour_bucket_agnostic": -0.002774259721610728,
+    "pred_type_segment_agnostic": 0.08823932488069923
+  },
+  "stacker_no_clinic_coefficients": {
+    "pred_clinic_agnostic": 5.21615725762789,
+    "pred_hour_bucket_agnostic": 0.01629580752446523,
+    "pred_type_segment_agnostic": 0.09123898737654072
+  },
+  "model_artifacts": {
+    "clinic_aware": {
+      "median_best_iter": 372,
+      "oof_ap": 0.4895728884529213,
+      "fold_ap_mean": 0.4899274388451215
+    },
+    "clinic_agnostic": {
+      "median_best_iter": 404,
+      "oof_ap": 0.48982080957441854,
+      "fold_ap_mean": 0.4902787150257935
+    },
+    "hour_bucket_agnostic": {
+      "median_best_iter": 402,
+      "oof_ap": 0.42806876009304307,
+      "fold_ap_mean": 0.47700139065425284
+    },
+    "type_segment_agnostic": {
+      "median_best_iter": 306,
+      "oof_ap": 0.4218095202426638,
+      "fold_ap_mean": 0.4296451758071748
+    }
+  }
+}
