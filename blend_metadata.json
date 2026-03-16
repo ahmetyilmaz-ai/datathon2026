@@ -1,40 +1,70 @@
 {
-  "stacker_all_oof_ap": 0.4896249280089696,
-  "stacker_no_clinic_oof_ap": 0.4895833092788337,
+  "stacker_all_oof_ap": 0.48962179163819863,
+  "stacker_no_clinic_oof_ap": 0.4896322915458751,
   "stacker_all_coefficients": {
-    "pred_clinic_aware": 2.3892140363382355,
-    "pred_clinic_agnostic": 2.4667169387234757,
-    "pred_lgb_clinic_aware": 0.016344673572037345,
-    "pred_lgb_clinic_agnostic": 0.42355316440271307
+    "pred_clinic_aware_seed1": 1.225815402222338,
+    "pred_clinic_aware_seed2": 1.243302452235824,
+    "pred_clinic_agnostic_seed1": 1.261456074924773,
+    "pred_clinic_agnostic_seed2": 1.2630982326968758,
+    "pred_lgb_clinic_aware_seed1": -0.015385959820482048,
+    "pred_lgb_clinic_aware_seed2": -0.023894641192342737,
+    "pred_lgb_clinic_agnostic_seed1": 0.16602442081810453,
+    "pred_lgb_clinic_agnostic_seed2": 0.17132419456886264
   },
   "stacker_no_clinic_coefficients": {
-    "pred_clinic_agnostic": 4.549274665384946,
-    "pred_lgb_clinic_agnostic": 0.7744975734603045
+    "pred_clinic_agnostic_seed1": 2.3625980848295427,
+    "pred_clinic_agnostic_seed2": 2.3738084674775433,
+    "pred_lgb_clinic_agnostic_seed1": 0.2989410386530572,
+    "pred_lgb_clinic_agnostic_seed2": 0.28272833050580753
   },
   "model_artifacts": {
-    "clinic_aware": {
+    "clinic_aware_seed1": {
       "model_type": "catboost",
-      "median_best_iter": 757,
+      "median_best_iter": 758,
       "oof_ap": 0.489296590845894,
       "fold_ap_mean": 0.48966288100825694
     },
-    "clinic_agnostic": {
+    "clinic_aware_seed2": {
       "model_type": "catboost",
-      "median_best_iter": 749,
+      "median_best_iter": 777,
+      "oof_ap": 0.48925503958011085,
+      "fold_ap_mean": 0.4896093394261455
+    },
+    "clinic_agnostic_seed1": {
+      "model_type": "catboost",
+      "median_best_iter": 750,
       "oof_ap": 0.48950817619281445,
       "fold_ap_mean": 0.4898743629311302
     },
-    "lgb_clinic_aware": {
+    "clinic_agnostic_seed2": {
+      "model_type": "catboost",
+      "median_best_iter": 737,
+      "oof_ap": 0.48944719634457107,
+      "fold_ap_mean": 0.48976689350393693
+    },
+    "lgb_clinic_aware_seed1": {
       "model_type": "lightgbm",
       "median_best_iter": 152,
       "oof_ap": 0.47787174876912875,
       "fold_ap_mean": 0.47831339908411863
     },
-    "lgb_clinic_agnostic": {
+    "lgb_clinic_aware_seed2": {
+      "model_type": "lightgbm",
+      "median_best_iter": 152,
+      "oof_ap": 0.47808796453178415,
+      "fold_ap_mean": 0.47849563032314624
+    },
+    "lgb_clinic_agnostic_seed1": {
       "model_type": "lightgbm",
       "median_best_iter": 140,
       "oof_ap": 0.47952542582277036,
       "fold_ap_mean": 0.4800443235278438
+    },
+    "lgb_clinic_agnostic_seed2": {
+      "model_type": "lightgbm",
+      "median_best_iter": 153,
+      "oof_ap": 0.47985443073249573,
+      "fold_ap_mean": 0.4803872882971689
     }
   }
 }
