@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier, Pool
+from lightgbm import LGBMClassifier, early_stopping, log_evaluation
+from xgboost import XGBClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score
 
@@ -39,8 +41,10 @@ OUTPUT_IMPORTANCE = BASE_DIR / "feature_importance_full_models.csv"
 OUTPUT_META = BASE_DIR / "blend_metadata.json"
 
 MODEL_CONFIGS = [
+    # -------------------- CatBoost --------------------
     {
         "name": "clinic_aware",
+        "model_type": "catboost",
         "use_clinic_id": True,
         "params": {
             "iterations": 4000,
@@ -54,6 +58,7 @@ MODEL_CONFIGS = [
     },
     {
         "name": "clinic_agnostic",
+        "model_type": "catboost",
         "use_clinic_id": False,
         "params": {
             "iterations": 4000,
@@ -65,7 +70,66 @@ MODEL_CONFIGS = [
             "subsample": 0.78,
         },
     },
+    # -------------------- LightGBM --------------------
+    {
+        "name": "lgb_clinic_aware",
+        "model_type": "lightgbm",
+        "use_clinic_id": True,
+        "params": {
+            "n_estimators": 3000,
+            "learning_rate": 0.02,
+            "num_leaves": 31,
+            "subsample": 0.80,
+            "colsample_bytree": 0.90,
+            "min_child_samples": 40,
+            "reg_lambda": 0.0,
+        },
+    },
+    {
+        "name": "lgb_clinic_agnostic",
+        "model_type": "lightgbm",
+        "use_clinic_id": False,
+        "params": {
+            "n_estimators": 3000,
+            "learning_rate": 0.02,
+            "num_leaves": 31,
+            "subsample": 0.80,
+            "colsample_bytree": 0.90,
+            "min_child_samples": 60,
+            "reg_lambda": 0.0,
+        },
+    },
+    # -------------------- XGBoost --------------------
+    {
+        "name": "xgb_clinic_aware",
+        "model_type": "xgboost",
+        "use_clinic_id": True,
+        "params": {
+            "n_estimators": 3000,
+            "learning_rate": 0.015,
+            "max_depth": 6,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "tree_method": "hist",
+            "enable_categorical": True,
+        },
+    },
+    {
+        "name": "xgb_clinic_agnostic",
+        "model_type": "xgboost",
+        "use_clinic_id": False,
+        "params": {
+            "n_estimators": 3000,
+            "learning_rate": 0.015,
+            "max_depth": 6,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "tree_method": "hist",
+            "enable_categorical": True,
+        },
+    },
 ]
+
 
 # =========================================================
 # LOAD / MERGE
@@ -92,12 +156,12 @@ def load_data():
 
 
 # =========================================================
-# LEAKAGE-SAFE TEMPORAL PATIENT HISTORY
-# - 2025 cumulative appointment count
-# - 2025 cumulative known no-show count (train labels only)
-# - days since previous appointment
+# LEAKAGE-SAFE TEMPORAL HISTORIES
+# - Patient 2025 cumulative history
+# - Patient recency
+# - Clinic 2025 cumulative history
 # =========================================================
-def add_temporal_patient_history(train_df, test_df):
+def add_temporal_histories(train_df, test_df):
     train_df = train_df.copy()
     test_df = test_df.copy()
 
@@ -108,33 +172,50 @@ def add_temporal_patient_history(train_df, test_df):
         test_df[TARGET] = np.nan
 
     combined = pd.concat([train_df, test_df], axis=0, ignore_index=True, sort=False)
-    combined = combined.sort_values(["patient_id", TIME_COL, ID_COL]).reset_index(drop=True)
+    combined = combined.sort_values([TIME_COL, ID_COL]).reset_index(drop=True)
 
-    # 1) Cumulative 2025 appointment count: strictly previous rows only
-    combined["patient_2025_appt_count"] = combined.groupby("patient_id").cumcount()
-
-    # 2) Cumulative 2025 no-show count:
-    # Only TRAIN rows contribute label information.
-    # TEST labels are unknown, so they contribute 0.
+    # Sadece train label'ları biliniyor
     combined["_known_noshow"] = np.where(
         combined["_is_train"] == 1,
         combined[TARGET].fillna(0),
         0,
     )
 
+    # ------------------------------
+    # Patient rolling history + recency
+    # ------------------------------
+    combined = combined.sort_values(["patient_id", TIME_COL, ID_COL]).reset_index(drop=True)
+
+    combined["patient_2025_appt_count"] = combined.groupby("patient_id").cumcount()
+
     combined["patient_2025_noshow_count"] = (
         combined.groupby("patient_id")["_known_noshow"].cumsum() - combined["_known_noshow"]
     )
 
-    # 3) Recency: days since last appointment, only previous appointment per patient
     combined["prev_appt_datetime"] = combined.groupby("patient_id")[TIME_COL].shift(1)
     combined["days_since_last_appt"] = (
         (combined[TIME_COL] - combined["prev_appt_datetime"]).dt.total_seconds() / 86400.0
     )
     combined["days_since_last_appt"] = combined["days_since_last_appt"].fillna(-1.0)
 
+    # ------------------------------
+    # Clinic rolling history
+    # ------------------------------
+    combined = combined.sort_values(["clinic_id", TIME_COL, ID_COL]).reset_index(drop=True)
+
+    combined["clinic_2025_appt_count"] = combined.groupby("clinic_id").cumcount()
+
+    combined["clinic_2025_noshow_count"] = (
+        combined.groupby("clinic_id")["_known_noshow"].cumsum() - combined["_known_noshow"]
+    )
+
+    # Geri global zamansal sıraya dön
+    combined = combined.sort_values([TIME_COL, ID_COL]).reset_index(drop=True)
+
     combined["patient_2025_appt_count"] = combined["patient_2025_appt_count"].astype(np.int32)
     combined["patient_2025_noshow_count"] = combined["patient_2025_noshow_count"].astype(np.int32)
+    combined["clinic_2025_appt_count"] = combined["clinic_2025_appt_count"].astype(np.int32)
+    combined["clinic_2025_noshow_count"] = combined["clinic_2025_noshow_count"].astype(np.int32)
     combined["days_since_last_appt"] = combined["days_since_last_appt"].astype(float)
 
     train_out = combined.loc[combined["_is_train"] == 1].drop(
@@ -206,7 +287,7 @@ def add_features(df):
     df["sms_sent_x_has_phone"] = (df["sms_sent"] * df["has_phone"]).astype(int)
 
     # ------------------------------
-    # historical patient features (pre-2025 from patients.csv)
+    # pre-2025 patient history
     # ------------------------------
     df["prior_show_count"] = (df["prior_appt_count"] - df["prior_noshow_count"]).clip(lower=0)
     df["has_prior_history"] = (df["prior_appt_count"] > 0).astype(int)
@@ -220,20 +301,18 @@ def add_features(df):
     df["prior_noshow_ratio_safe"] = df["prior_noshow_rate_safe"]
 
     # ------------------------------
-    # 2025 cumulative patient history
+    # patient 2025 history + recency
     # ------------------------------
     df["patient_2025_has_history"] = (df["patient_2025_appt_count"] > 0).astype(int)
     df["patient_2025_show_count"] = (
         df["patient_2025_appt_count"] - df["patient_2025_noshow_count"]
     ).clip(lower=0)
 
-    # İstenen dinamik oran
     df["patient_2025_noshow_rate"] = (
         df["patient_2025_noshow_count"] / np.maximum(df["patient_2025_appt_count"], 1)
     )
     df["patient_2025_noshow_rate_safe"] = df["patient_2025_noshow_rate"]
 
-    # Recency
     df["has_prev_appt_2025"] = (df["days_since_last_appt"] >= 0).astype(int)
     df["days_since_last_appt_log1p"] = np.where(
         df["days_since_last_appt"] >= 0,
@@ -248,6 +327,19 @@ def add_features(df):
     ).astype(int)
 
     # ------------------------------
+    # clinic 2025 history
+    # ------------------------------
+    df["clinic_2025_has_history"] = (df["clinic_2025_appt_count"] > 0).astype(int)
+    df["clinic_2025_show_count"] = (
+        df["clinic_2025_appt_count"] - df["clinic_2025_noshow_count"]
+    ).clip(lower=0)
+
+    df["clinic_2025_noshow_rate"] = (
+        df["clinic_2025_noshow_count"] / np.maximum(df["clinic_2025_appt_count"], 1)
+    )
+    df["clinic_2025_noshow_rate_safe"] = df["clinic_2025_noshow_rate"]
+
+    # ------------------------------
     # strong numeric interactions
     # ------------------------------
     df["prior_noshow_rate_squared"] = df["prior_noshow_rate_safe"] ** 2
@@ -260,12 +352,14 @@ def add_features(df):
     df["distance_x_noshow_rate"] = df["distance_km"] * df["prior_noshow_rate_safe"]
     df["wait_time_x_noshow"] = df["wait_mins_est"] * df["prior_noshow_rate_safe"]
 
-    # 2025 dynamic history interactions
     df["patient2025_noshow_x_lead"] = df["patient_2025_noshow_rate"] * df["lead_time_days"]
     df["patient2025_noshow_x_distance"] = df["patient_2025_noshow_rate"] * df["distance_km"]
     df["patient2025_noshow_x_wait"] = df["patient_2025_noshow_rate"] * df["wait_mins_est"]
 
-    # Recency interactions
+    df["clinic2025_noshow_x_wait"] = df["clinic_2025_noshow_rate"] * df["wait_mins_est"]
+    df["clinic2025_noshow_x_load"] = df["clinic_2025_noshow_rate"] * df["clinic_load_ratio"]
+    df["clinic2025_noshow_x_capacity"] = df["clinic_2025_noshow_rate"] * df["capacity_daily"]
+
     df["recency_x_prior_noshow"] = df["days_since_last_appt_log1p"] * df["prior_noshow_rate_safe"]
     df["recency_x_2025_noshow"] = df["days_since_last_appt_log1p"] * df["patient_2025_noshow_rate"]
     df["recency_x_distance"] = df["days_since_last_appt_log1p"] * df["distance_km"]
@@ -474,7 +568,7 @@ def build_rolling_folds(df, n_folds=N_FOLDS, valid_days=ROLLING_VALID_DAYS, step
 
 
 # =========================================================
-# MODEL HELPERS
+# MODEL BUILDERS
 # =========================================================
 def build_catboost(params, random_seed=RANDOM_SEED):
     return CatBoostClassifier(
@@ -497,28 +591,162 @@ def build_catboost(params, random_seed=RANDOM_SEED):
     )
 
 
+def build_lgbm(params, random_seed=RANDOM_SEED):
+    return LGBMClassifier(
+        objective="binary",
+        boosting_type="gbdt",
+        n_estimators=params["n_estimators"],
+        learning_rate=params["learning_rate"],
+        num_leaves=params["num_leaves"],
+        subsample=params.get("subsample", 0.8),
+        colsample_bytree=params.get("colsample_bytree", 0.9),
+        min_child_samples=params.get("min_child_samples", 40),
+        reg_lambda=params.get("reg_lambda", 0.0),
+        random_state=random_seed,
+        n_jobs=-1,
+        verbosity=-1,
+    )
+
+
+def build_xgb(params, random_seed=RANDOM_SEED):
+    return XGBClassifier(
+        objective="binary:logistic",
+        n_estimators=params["n_estimators"],
+        learning_rate=params["learning_rate"],
+        max_depth=params["max_depth"],
+        subsample=params["subsample"],
+        colsample_bytree=params["colsample_bytree"],
+        tree_method=params["tree_method"],
+        enable_categorical=params["enable_categorical"],
+        eval_metric="aucpr",
+        early_stopping_rounds=200,
+        random_state=random_seed,
+        n_jobs=-1,
+        verbosity=0,
+    )
+
+
+def cast_category_columns(train_df, other_df, cat_features):
+    train_df = train_df.copy()
+    other_df = other_df.copy()
+
+    for col in cat_features:
+        train_vals = train_df[col].astype(str)
+        other_vals = other_df[col].astype(str)
+        categories = pd.Index(pd.concat([train_vals, other_vals], axis=0).unique())
+        dtype = pd.CategoricalDtype(categories=categories)
+
+        train_df[col] = train_vals.astype(dtype)
+        other_df[col] = other_vals.astype(dtype)
+
+    return train_df, other_df
+
+
+# =========================================================
+# MODEL TRAIN / PREDICT
+# =========================================================
 def train_predict_single_model(train_fold, valid_fold, cfg):
     te_cols = get_te_cols(use_clinic_id=cfg["use_clinic_id"])
     train_enc, valid_enc, _ = apply_target_encoding(train_fold, valid_fold, te_cols)
     features, cat_features = build_feature_lists(train_enc, use_clinic_id=cfg["use_clinic_id"])
 
-    train_sorted = train_enc.sort_values(TIME_COL)
-    valid_sorted = valid_enc.sort_values(TIME_COL)
+    train_sorted = train_enc.sort_values(TIME_COL).copy()
+    valid_sorted = valid_enc.sort_values(TIME_COL).copy()
 
-    train_pool = Pool(train_sorted[features], train_sorted[TARGET], cat_features=cat_features)
-    valid_pool = Pool(valid_sorted[features], valid_sorted[TARGET], cat_features=cat_features)
+    if cfg["model_type"] == "catboost":
+        train_pool = Pool(train_sorted[features], train_sorted[TARGET], cat_features=cat_features)
+        valid_pool = Pool(valid_sorted[features], valid_sorted[TARGET], cat_features=cat_features)
 
-    model = build_catboost(cfg["params"])
-    model.fit(train_pool, eval_set=valid_pool, use_best_model=True)
+        model = build_catboost(cfg["params"])
+        model.fit(train_pool, eval_set=valid_pool, use_best_model=True)
 
-    preds = model.predict_proba(valid_pool)[:, 1]
-    pred_s = pd.Series(preds, index=valid_sorted.index).sort_index()
+        preds = model.predict_proba(valid_pool)[:, 1]
+        pred_s = pd.Series(preds, index=valid_sorted.index).sort_index()
 
-    best_iter = model.get_best_iteration()
-    if best_iter is None or best_iter <= 0:
-        best_iter = model.tree_count_
+        best_iter = model.get_best_iteration()
+        if best_iter is None or best_iter <= 0:
+            best_iter = model.tree_count_
+        else:
+            best_iter = best_iter + 1
 
-    return pred_s, int(best_iter), model, features, cat_features
+        importance = pd.DataFrame(
+            {
+                "model": cfg["name"],
+                "feature": features,
+                "importance": model.get_feature_importance(train_pool),
+            }
+        ).sort_values(["importance", "feature"], ascending=[False, True])
+
+        return pred_s, int(best_iter), model, importance
+
+    elif cfg["model_type"] == "lightgbm":
+        X_train = train_sorted[features].copy()
+        X_valid = valid_sorted[features].copy()
+
+        X_train, X_valid = cast_category_columns(X_train, X_valid, cat_features)
+
+        model = build_lgbm(cfg["params"])
+        model.fit(
+            X_train,
+            train_sorted[TARGET],
+            eval_set=[(X_valid, valid_sorted[TARGET])],
+            eval_metric="average_precision",
+            categorical_feature=cat_features,
+            callbacks=[early_stopping(200, verbose=False), log_evaluation(0)],
+        )
+
+        preds = model.predict_proba(X_valid)[:, 1]
+        pred_s = pd.Series(preds, index=valid_sorted.index).sort_index()
+
+        best_iter = model.best_iteration_
+        if best_iter is None or best_iter <= 0:
+            best_iter = cfg["params"]["n_estimators"]
+
+        importance = pd.DataFrame(
+            {
+                "model": cfg["name"],
+                "feature": features,
+                "importance": model.booster_.feature_importance(importance_type="gain"),
+            }
+        ).sort_values(["importance", "feature"], ascending=[False, True])
+
+        return pred_s, int(best_iter), model, importance
+
+    elif cfg["model_type"] == "xgboost":
+        X_train = train_sorted[features].copy()
+        X_valid = valid_sorted[features].copy()
+
+        X_train, X_valid = cast_category_columns(X_train, X_valid, cat_features)
+
+        model = build_xgb(cfg["params"])
+        model.fit(
+            X_train,
+            train_sorted[TARGET],
+            eval_set=[(X_valid, valid_sorted[TARGET])],
+            verbose=False,
+        )
+
+        preds = model.predict_proba(X_valid)[:, 1]
+        pred_s = pd.Series(preds, index=valid_sorted.index).sort_index()
+
+        best_iter = getattr(model, "best_iteration", None)
+        if best_iter is None or best_iter < 0:
+            best_iter = cfg["params"]["n_estimators"]
+        else:
+            best_iter = best_iter + 1
+
+        importance = pd.DataFrame(
+            {
+                "model": cfg["name"],
+                "feature": features,
+                "importance": model.feature_importances_,
+            }
+        ).sort_values(["importance", "feature"], ascending=[False, True])
+
+        return pred_s, int(best_iter), model, importance
+
+    else:
+        raise ValueError(f"Unsupported model_type: {cfg['model_type']}")
 
 
 # =========================================================
@@ -530,10 +758,11 @@ def run_oof_training(train_df, folds, model_configs):
     model_artifacts = {}
 
     for cfg in model_configs:
-        print(f"\n===== OOF training: {cfg['name']} =====")
+        print(f"\n===== OOF training: {cfg['name']} ({cfg['model_type']}) =====")
         oof_pred = pd.Series(index=train_df.index, dtype=float)
         fold_scores = []
         best_iters = []
+        importance_frames = []
 
         for fold_info in folds:
             fold_no = fold_info["fold"]
@@ -543,8 +772,9 @@ def run_oof_training(train_df, folds, model_configs):
             tr_fold = train_df.loc[tr_idx].copy()
             va_fold = train_df.loc[va_idx].copy()
 
-            pred_s, best_iter, _, _, _ = train_predict_single_model(tr_fold, va_fold, cfg)
+            pred_s, best_iter, _, fold_importance = train_predict_single_model(tr_fold, va_fold, cfg)
             best_iters.append(best_iter)
+            importance_frames.append(fold_importance)
 
             oof_pred.loc[pred_s.index] = pred_s.values
             fold_ap = average_precision_score(va_fold[TARGET], pred_s.loc[va_fold.index])
@@ -553,6 +783,7 @@ def run_oof_training(train_df, folds, model_configs):
             cv_rows.append(
                 {
                     "model": cfg["name"],
+                    "model_type": cfg["model_type"],
                     "fold": fold_no,
                     "valid_start": str(fold_info["valid_start"].date()),
                     "valid_end": str(fold_info["valid_end"].date()),
@@ -570,7 +801,21 @@ def run_oof_training(train_df, folds, model_configs):
 
         overall_mask = oof_pred.notna()
         overall_ap = average_precision_score(train_df.loc[overall_mask, TARGET], oof_pred.loc[overall_mask])
-        median_best_iter = int(np.median(best_iters)) if best_iters else cfg["params"]["iterations"]
+
+        if best_iters:
+            median_best_iter = int(np.median(best_iters))
+        else:
+            if cfg["model_type"] == "catboost":
+                median_best_iter = cfg["params"]["iterations"]
+            else:
+                median_best_iter = cfg["params"]["n_estimators"]
+
+        mean_importance = (
+            pd.concat(importance_frames, ignore_index=True)
+            .groupby(["model", "feature"], as_index=False)["importance"]
+            .mean()
+            .sort_values(["importance", "feature"], ascending=[False, True])
+        )
 
         oof_frame[f"pred_{cfg['name']}"] = oof_pred
         model_artifacts[cfg["name"]] = {
@@ -578,6 +823,7 @@ def run_oof_training(train_df, folds, model_configs):
             "median_best_iter": median_best_iter,
             "oof_ap": overall_ap,
             "fold_ap_mean": float(np.mean(fold_scores)),
+            "importance": mean_importance,
         }
 
         print(
@@ -593,38 +839,50 @@ def run_oof_training(train_df, folds, model_configs):
 # STACKERS
 # =========================================================
 def fit_stackers(oof_frame):
+    # Tüm 6 model
     base_cols_all = [
         "pred_clinic_aware",
         "pred_clinic_agnostic",
+        "pred_lgb_clinic_aware",
+        "pred_lgb_clinic_agnostic",
+        "pred_xgb_clinic_aware",
+        "pred_xgb_clinic_agnostic",
     ]
+
+    # Cold-start için sadece 3 agnostic model
     base_cols_no_clinic = [
         "pred_clinic_agnostic",
+        "pred_lgb_clinic_agnostic",
+        "pred_xgb_clinic_agnostic",
     ]
 
     mask_all = oof_frame[base_cols_all].notna().all(axis=1)
     X_all = oof_frame.loc[mask_all, base_cols_all].values
     y_all = oof_frame.loc[mask_all, TARGET].values
 
+    mask_no = oof_frame[base_cols_no_clinic].notna().all(axis=1)
+    X_no = oof_frame.loc[mask_no, base_cols_no_clinic].values
+    y_no = oof_frame.loc[mask_no, TARGET].values
+
     stacker_all = LogisticRegression(C=0.5, max_iter=1000, solver="lbfgs")
     stacker_all.fit(X_all, y_all)
 
-    X_no = oof_frame.loc[mask_all, base_cols_no_clinic].values
     stacker_no_clinic = LogisticRegression(C=0.5, max_iter=1000, solver="lbfgs")
-    stacker_no_clinic.fit(X_no, y_all)
+    stacker_no_clinic.fit(X_no, y_no)
 
     stacked_all_oof = stacker_all.predict_proba(X_all)[:, 1]
     stacked_no_oof = stacker_no_clinic.predict_proba(X_no)[:, 1]
 
     ap_all = average_precision_score(y_all, stacked_all_oof)
-    ap_no = average_precision_score(y_all, stacked_no_oof)
+    ap_no = average_precision_score(y_no, stacked_no_oof)
 
     coef_all = dict(zip(base_cols_all, stacker_all.coef_[0]))
     coef_no = dict(zip(base_cols_no_clinic, stacker_no_clinic.coef_[0]))
 
-    print(f"\nStacker(all models) OOF AP: {ap_all:.6f}")
-    print(f"Stacker(no clinic-aware) OOF AP: {ap_no:.6f}")
+    print(f"\nStacker(all 6 models) OOF AP: {ap_all:.6f}")
+    print(f"Stacker(cold-start agnostic 3 models) OOF AP: {ap_no:.6f}")
     print("All-model stacker coefficients:", coef_all)
-    print("No-clinic stacker coefficients:", coef_no)
+    print("Cold-start stacker coefficients:", coef_no)
 
     return {
         "stacker_all": stacker_all,
@@ -646,28 +904,86 @@ def fit_full_single_model(train_df, test_df, cfg, best_iter):
     train_enc, test_enc, _ = apply_target_encoding(train_df, test_df, te_cols)
     features, cat_features = build_feature_lists(train_enc, use_clinic_id=cfg["use_clinic_id"])
 
-    train_sorted = train_enc.sort_values(TIME_COL)
-    test_sorted = test_enc.sort_values(TIME_COL)
+    train_sorted = train_enc.sort_values(TIME_COL).copy()
+    test_sorted = test_enc.sort_values(TIME_COL).copy()
 
-    model_params = dict(cfg["params"])
-    model_params["iterations"] = max(best_iter, 200)
-    model = build_catboost(model_params)
+    if cfg["model_type"] == "catboost":
+        model_params = dict(cfg["params"])
+        model_params["iterations"] = max(best_iter, 200)
+        model = build_catboost(model_params)
 
-    train_pool = Pool(train_sorted[features], train_sorted[TARGET], cat_features=cat_features)
-    test_pool = Pool(test_sorted[features], cat_features=cat_features)
-    model.fit(train_pool)
+        train_pool = Pool(train_sorted[features], train_sorted[TARGET], cat_features=cat_features)
+        test_pool = Pool(test_sorted[features], cat_features=cat_features)
+        model.fit(train_pool)
 
-    test_pred = pd.Series(model.predict_proba(test_pool)[:, 1], index=test_sorted.index).sort_index()
+        test_pred = pd.Series(model.predict_proba(test_pool)[:, 1], index=test_sorted.index).sort_index()
 
-    fi = pd.DataFrame(
-        {
-            "model": cfg["name"],
-            "feature": features,
-            "importance": model.get_feature_importance(train_pool),
-        }
-    ).sort_values(["importance", "feature"], ascending=[False, True])
+        fi = pd.DataFrame(
+            {
+                "model": cfg["name"],
+                "feature": features,
+                "importance": model.get_feature_importance(train_pool),
+            }
+        ).sort_values(["importance", "feature"], ascending=[False, True])
 
-    return test_pred, model, fi
+        return test_pred, model, fi
+
+    elif cfg["model_type"] == "lightgbm":
+        model_params = dict(cfg["params"])
+        model_params["n_estimators"] = max(best_iter, 200)
+        model = build_lgbm(model_params)
+
+        X_train = train_sorted[features].copy()
+        X_test = test_sorted[features].copy()
+        X_train, X_test = cast_category_columns(X_train, X_test, cat_features)
+
+        model.fit(
+            X_train,
+            train_sorted[TARGET],
+            categorical_feature=cat_features,
+        )
+
+        test_pred = pd.Series(model.predict_proba(X_test)[:, 1], index=test_sorted.index).sort_index()
+
+        fi = pd.DataFrame(
+            {
+                "model": cfg["name"],
+                "feature": features,
+                "importance": model.booster_.feature_importance(importance_type="gain"),
+            }
+        ).sort_values(["importance", "feature"], ascending=[False, True])
+
+        return test_pred, model, fi
+
+    elif cfg["model_type"] == "xgboost":
+        model_params = dict(cfg["params"])
+        model_params["n_estimators"] = max(best_iter, 200)
+        model = build_xgb(model_params)
+
+        X_train = train_sorted[features].copy()
+        X_test = test_sorted[features].copy()
+        X_train, X_test = cast_category_columns(X_train, X_test, cat_features)
+
+        model.fit(
+            X_train,
+            train_sorted[TARGET],
+            verbose=False,
+        )
+
+        test_pred = pd.Series(model.predict_proba(X_test)[:, 1], index=test_sorted.index).sort_index()
+
+        fi = pd.DataFrame(
+            {
+                "model": cfg["name"],
+                "feature": features,
+                "importance": model.feature_importances_,
+            }
+        ).sort_values(["importance", "feature"], ascending=[False, True])
+
+        return test_pred, model, fi
+
+    else:
+        raise ValueError(f"Unsupported model_type: {cfg['model_type']}")
 
 
 def fit_all_full_models(train_df, test_df, artifacts):
@@ -677,7 +993,7 @@ def fit_all_full_models(train_df, test_df, artifacts):
     for model_name, meta in artifacts.items():
         cfg = meta["config"]
         best_iter = meta["median_best_iter"]
-        print(f"\n===== Full fit: {model_name} | iterations={best_iter} =====")
+        print(f"\n===== Full fit: {model_name} ({cfg['model_type']}) | best_iter={best_iter} =====")
 
         pred_s, _, fi = fit_full_single_model(train_df, test_df, cfg, best_iter)
         pred_frame[f"pred_{model_name}"] = pred_s.values
@@ -732,8 +1048,8 @@ def make_final_submission(test_df, sample_sub, pred_frame, stacker_meta):
 def main():
     train_raw, test_raw, sample_sub = load_data()
 
-    # Leakage-safe temporal patient history
-    train_hist, test_hist = add_temporal_patient_history(train_raw, test_raw)
+    # Leakage-safe patient + clinic temporal histories
+    train_hist, test_hist = add_temporal_histories(train_raw, test_raw)
 
     train_df = add_features(train_hist)
     test_df = add_features(test_hist)
@@ -748,9 +1064,14 @@ def main():
         f"clinics={sorted(test_df.loc[test_df['is_cold_start_clinic'] == 1, 'clinic_id'].unique().tolist())}"
     )
     print(
-        "2025 history coverage | "
+        "2025 patient history coverage | "
         f"train has_history={train_df['patient_2025_has_history'].mean():.4%}, "
         f"test has_history={test_df['patient_2025_has_history'].mean():.4%}"
+    )
+    print(
+        "2025 clinic history coverage | "
+        f"train has_history={train_df['clinic_2025_has_history'].mean():.4%}, "
+        f"test has_history={test_df['clinic_2025_has_history'].mean():.4%}"
     )
     print(
         "recency coverage | "
@@ -784,6 +1105,7 @@ def main():
         "stacker_no_clinic_coefficients": stacker_meta["coef_no_clinic"],
         "model_artifacts": {
             k: {
+                "model_type": v["config"]["model_type"],
                 "median_best_iter": int(v["median_best_iter"]),
                 "oof_ap": float(v["oof_ap"]),
                 "fold_ap_mean": float(v["fold_ap_mean"]),
