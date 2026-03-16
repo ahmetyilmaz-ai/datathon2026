@@ -49,7 +49,7 @@ MODEL_CONFIGS = [
         "name": "clinic_aware_seed1",
         "use_clinic_id": True,
         "params": {
-            "iterations": 2000,
+            "iterations": 3000,
             "learning_rate": 0.03,
             "depth": 6,
             "l2_leaf_reg": 25,
@@ -63,7 +63,7 @@ MODEL_CONFIGS = [
         "name": "clinic_aware_seed2",
         "use_clinic_id": True,
         "params": {
-            "iterations": 2000,
+            "iterations": 3000,
             "learning_rate": 0.03,
             "depth": 6,
             "l2_leaf_reg": 25,
@@ -77,7 +77,7 @@ MODEL_CONFIGS = [
         "name": "clinic_agnostic_seed1",
         "use_clinic_id": False,
         "params": {
-            "iterations": 2000,
+            "iterations": 3000,
             "learning_rate": 0.03,
             "depth": 6,
             "l2_leaf_reg": 25,
@@ -91,7 +91,7 @@ MODEL_CONFIGS = [
         "name": "clinic_agnostic_seed2",
         "use_clinic_id": False,
         "params": {
-            "iterations": 2000,
+            "iterations": 3000,
             "learning_rate": 0.03,
             "depth": 6,
             "l2_leaf_reg": 25,
@@ -252,7 +252,8 @@ def add_features(df):
 
     # ------------------------------
     # pre-2025 patient history
-    # User-requested formula
+    # Kullanıcı istediği formül:
+    # prior_noshow_count / prior_appt_count.clip(lower=1)
     # ------------------------------
     df["prior_show_count"] = (df["prior_appt_count"] - df["prior_noshow_count"]).clip(lower=0)
     df["prior_noshow_rate"] = (
@@ -446,7 +447,7 @@ def build_feature_lists(df, use_clinic_id=True):
         "clinic_lon",
         "sms_lead_hours",
         "is_cold_start_clinic",
-        # removed low-importance / noisy features
+        # removed noisy features
         "is_month_start",
         "is_month_end",
         "clinic_2025_has_history",
@@ -550,7 +551,7 @@ def build_catboost(params):
         has_time=True,
         random_seed=params.get("random_seed", SEED1),
         od_type="Iter",
-        od_wait=200,
+        od_wait=300,
         task_type="GPU",
         devices="0",
         verbose=False,
@@ -575,14 +576,13 @@ def train_predict_single_model(train_fold, valid_fold, cfg):
     preds = model.predict_proba(valid_pool)[:, 1]
     pred_s = pd.Series(preds, index=valid_sorted.index).sort_index()
 
-    best_iter = model.get_best_iteration()
-    if best_iter is None or best_iter <= 0:
-        best_iter = model.tree_count_
+    raw_best_iter = model.get_best_iteration()
+    if raw_best_iter is None or raw_best_iter <= 0:
+        raw_best_iter = model.tree_count_
     else:
-        best_iter = best_iter + 1
+        raw_best_iter = raw_best_iter + 1
 
-    # Underfit guard
-    best_iter = max(int(best_iter), 500)
+    used_iter = max(int(raw_best_iter), 500)
 
     fi = pd.DataFrame(
         {
@@ -592,7 +592,7 @@ def train_predict_single_model(train_fold, valid_fold, cfg):
         }
     ).sort_values(["importance", "feature"], ascending=[False, True])
 
-    return pred_s, best_iter, model, fi
+    return pred_s, int(raw_best_iter), int(used_iter), model, fi
 
 
 # =========================================================
@@ -608,7 +608,8 @@ def run_oof_training(train_df, folds, model_configs):
         print(f"\n===== OOF training: {cfg['name']} =====")
         oof_pred = pd.Series(index=train_df.index, dtype=float)
         fold_scores = []
-        best_iters = []
+        raw_best_iters = []
+        used_iters = []
 
         for fold_info in folds:
             fold_no = fold_info["fold"]
@@ -618,8 +619,9 @@ def run_oof_training(train_df, folds, model_configs):
             tr_fold = train_df.loc[tr_idx].copy()
             va_fold = train_df.loc[va_idx].copy()
 
-            pred_s, best_iter, _, fi = train_predict_single_model(tr_fold, va_fold, cfg)
-            best_iters.append(best_iter)
+            pred_s, raw_best_iter, used_iter, _, fi = train_predict_single_model(tr_fold, va_fold, cfg)
+            raw_best_iters.append(raw_best_iter)
+            used_iters.append(used_iter)
             fi["fold"] = fold_no
             fi_frames.append(fi)
 
@@ -636,6 +638,8 @@ def run_oof_training(train_df, folds, model_configs):
                     "fold_ap": fold_ap,
                     "n_train": len(tr_fold),
                     "n_valid": len(va_fold),
+                    "raw_best_iter": int(raw_best_iter),
+                    "used_iter": int(used_iter),
                 }
             )
 
@@ -643,24 +647,29 @@ def run_oof_training(train_df, folds, model_configs):
                 f"Fold {fold_no}: AP={fold_ap:.6f} | "
                 f"valid={fold_info['valid_start'].date()} -> {fold_info['valid_end'].date()} | "
                 f"n_train={len(tr_fold):,} n_valid={len(va_fold):,} | "
-                f"best_iter_used={best_iter}"
+                f"raw_best_iter={raw_best_iter} | used_iter={used_iter}"
             )
 
         overall_mask = oof_pred.notna()
         overall_ap = average_precision_score(train_df.loc[overall_mask, TARGET], oof_pred.loc[overall_mask])
-        median_best_iter = max(int(np.median(best_iters)), 500) if best_iters else 500
+
+        median_raw_iter = int(np.median(raw_best_iters)) if raw_best_iters else 0
+        median_used_iter = max(int(np.median(used_iters)), 500) if used_iters else 500
 
         oof_frame[f"pred_{cfg['name']}"] = oof_pred
         model_artifacts[cfg["name"]] = {
             "config": cfg,
-            "median_best_iter": median_best_iter,
+            "median_best_iter": median_used_iter,
+            "median_raw_best_iter": median_raw_iter,
             "oof_ap": overall_ap,
             "fold_ap_mean": float(np.mean(fold_scores)),
         }
 
         print(
             f"{cfg['name']} overall OOF AP={overall_ap:.6f} | "
-            f"fold mean={np.mean(fold_scores):.6f} | median_best_iter={median_best_iter}"
+            f"fold mean={np.mean(fold_scores):.6f} | "
+            f"median_raw_best_iter={median_raw_iter} | "
+            f"median_used_iter={median_used_iter}"
         )
 
     cv_summary = pd.DataFrame(cv_rows)
@@ -857,7 +866,12 @@ def main():
     blend_meta = evaluate_mean_blend_oof(oof_frame)
 
     pred_frame, fi_full = fit_all_full_models(train_df, test_df, artifacts)
-    submission, extra_pred_frame = make_final_submission(test_df, sample_sub, blend_meta=blend_meta, pred_frame=pred_frame)
+    submission, extra_pred_frame = make_final_submission(
+        test_df=test_df,
+        sample_sub=sample_sub,
+        pred_frame=pred_frame,
+        blend_meta=blend_meta,
+    )
 
     # Save outputs
     oof_save = blend_meta["oof_frame"]
@@ -880,6 +894,7 @@ def main():
         "task_type": "GPU",
         "devices": "0",
         "bootstrap_type": "Poisson",
+        "eval_metric_for_early_stopping": "Logloss",
         "min_forced_iterations": 500,
         "all_model_columns": blend_meta["all_cols"],
         "agnostic_model_columns": blend_meta["agnostic_cols"],
@@ -888,6 +903,7 @@ def main():
         "model_artifacts": {
             k: {
                 "median_best_iter": int(v["median_best_iter"]),
+                "median_raw_best_iter": int(v["median_raw_best_iter"]),
                 "oof_ap": float(v["oof_ap"]),
                 "fold_ap_mean": float(v["fold_ap_mean"]),
                 "use_clinic_id": bool(v["config"]["use_clinic_id"]),
@@ -900,7 +916,9 @@ def main():
     }
     OUTPUT_META.write_text(json.dumps(meta_out, indent=2, ensure_ascii=False))
 
-    final_pred_summary = extra_pred_frame["final_pred"].describe(percentiles=[0.01, 0.05, 0.5, 0.95, 0.99])
+    final_pred_summary = extra_pred_frame["final_pred"].describe(
+        percentiles=[0.01, 0.05, 0.5, 0.95, 0.99]
+    )
 
     print("\nFinal prediction summary")
     print(final_pred_summary)
