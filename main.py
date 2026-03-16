@@ -42,61 +42,30 @@ MODEL_CONFIGS = [
     {
         "name": "clinic_aware",
         "use_clinic_id": True,
-        "segment_by_appt_type": False,
         "params": {
-            "iterations": 2600,
-            "learning_rate": 0.028,
+            "iterations": 4000,
+            "learning_rate": 0.015,
             "depth": 6,
-            "l2_leaf_reg": 12,
+            "l2_leaf_reg": 25,
             "min_data_in_leaf": 40,
-            "random_strength": 1.0,
+            "random_strength": 1.5,
             "subsample": 0.80,
         },
     },
     {
         "name": "clinic_agnostic",
         "use_clinic_id": False,
-        "segment_by_appt_type": False,
         "params": {
-            "iterations": 3000,
-            "learning_rate": 0.024,
+            "iterations": 4000,
+            "learning_rate": 0.015,
             "depth": 6,
-            "l2_leaf_reg": 14,
+            "l2_leaf_reg": 25,
             "min_data_in_leaf": 60,
-            "random_strength": 1.2,
+            "random_strength": 1.5,
             "subsample": 0.78,
         },
     },
-    {
-        "name": "hour_bucket_agnostic",
-        "use_clinic_id": False,
-        "segment_by_appt_type": False,
-        "params": {
-            "iterations": 3200,
-            "learning_rate": 0.022,
-            "depth": 5,
-            "l2_leaf_reg": 16,
-            "min_data_in_leaf": 70,
-            "random_strength": 1.2,
-            "subsample": 0.80,
-        },
-    },
-    {
-        "name": "type_segment_agnostic",
-        "use_clinic_id": False,
-        "segment_by_appt_type": True,
-        "params": {
-            "iterations": 2600,
-            "learning_rate": 0.025,
-            "depth": 5,
-            "l2_leaf_reg": 16,
-            "min_data_in_leaf": 55,
-            "random_strength": 1.0,
-            "subsample": 0.80,
-        },
-    },
 ]
-
 
 # =========================================================
 # LOAD / MERGE
@@ -117,9 +86,67 @@ def load_data():
     test = test.merge(patients, on="patient_id", how="left", validate="m:1")
     test = test.merge(clinics, on="clinic_id", how="left", validate="m:1")
 
-    train = train.sort_values(TIME_COL).reset_index(drop=True)
-    test = test.sort_values(TIME_COL).reset_index(drop=True)
+    train = train.sort_values([TIME_COL, ID_COL]).reset_index(drop=True)
+    test = test.sort_values([TIME_COL, ID_COL]).reset_index(drop=True)
     return train, test, sample_sub
+
+
+# =========================================================
+# LEAKAGE-SAFE TEMPORAL PATIENT HISTORY
+# - 2025 cumulative appointment count
+# - 2025 cumulative known no-show count (train labels only)
+# - days since previous appointment
+# =========================================================
+def add_temporal_patient_history(train_df, test_df):
+    train_df = train_df.copy()
+    test_df = test_df.copy()
+
+    train_df["_is_train"] = 1
+    test_df["_is_train"] = 0
+
+    if TARGET not in test_df.columns:
+        test_df[TARGET] = np.nan
+
+    combined = pd.concat([train_df, test_df], axis=0, ignore_index=True, sort=False)
+    combined = combined.sort_values(["patient_id", TIME_COL, ID_COL]).reset_index(drop=True)
+
+    # 1) Cumulative 2025 appointment count: strictly previous rows only
+    combined["patient_2025_appt_count"] = combined.groupby("patient_id").cumcount()
+
+    # 2) Cumulative 2025 no-show count:
+    # Only TRAIN rows contribute label information.
+    # TEST labels are unknown, so they contribute 0.
+    combined["_known_noshow"] = np.where(
+        combined["_is_train"] == 1,
+        combined[TARGET].fillna(0),
+        0,
+    )
+
+    combined["patient_2025_noshow_count"] = (
+        combined.groupby("patient_id")["_known_noshow"].cumsum() - combined["_known_noshow"]
+    )
+
+    # 3) Recency: days since last appointment, only previous appointment per patient
+    combined["prev_appt_datetime"] = combined.groupby("patient_id")[TIME_COL].shift(1)
+    combined["days_since_last_appt"] = (
+        (combined[TIME_COL] - combined["prev_appt_datetime"]).dt.total_seconds() / 86400.0
+    )
+    combined["days_since_last_appt"] = combined["days_since_last_appt"].fillna(-1.0)
+
+    combined["patient_2025_appt_count"] = combined["patient_2025_appt_count"].astype(np.int32)
+    combined["patient_2025_noshow_count"] = combined["patient_2025_noshow_count"].astype(np.int32)
+    combined["days_since_last_appt"] = combined["days_since_last_appt"].astype(float)
+
+    train_out = combined.loc[combined["_is_train"] == 1].drop(
+        columns=["_is_train", "_known_noshow", "prev_appt_datetime"]
+    )
+    test_out = combined.loc[combined["_is_train"] == 0].drop(
+        columns=["_is_train", "_known_noshow", "prev_appt_datetime", TARGET]
+    )
+
+    train_out = train_out.sort_values([TIME_COL, ID_COL]).reset_index(drop=True)
+    test_out = test_out.sort_values([TIME_COL, ID_COL]).reset_index(drop=True)
+    return train_out, test_out
 
 
 # =========================================================
@@ -137,10 +164,12 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 6371.0 * 2.0 * np.arcsin(np.sqrt(a))
 
 
-
 def add_features(df):
     df = df.copy()
 
+    # ------------------------------
+    # datetime features
+    # ------------------------------
     df[DATE_COL] = df[TIME_COL].dt.normalize()
     df["appt_month"] = df[TIME_COL].dt.month
     df["appt_day"] = df[TIME_COL].dt.day
@@ -158,6 +187,9 @@ def add_features(df):
     df["appointment_dow_sin"] = np.sin(2 * np.pi * df["appointment_dow"] / 7.0)
     df["appointment_dow_cos"] = np.cos(2 * np.pi * df["appointment_dow"] / 7.0)
 
+    # ------------------------------
+    # lead / booking features
+    # ------------------------------
     df["lead_time_days"] = df["lead_time_hours"] / 24.0
     df["lead_time_log1p"] = np.log1p(df["lead_time_hours"].clip(lower=0))
     df["same_day_booking"] = (df["lead_time_hours"] <= 24).astype(int)
@@ -165,27 +197,93 @@ def add_features(df):
     df["long_lead"] = (df["lead_time_hours"] >= 24 * 7).astype(int)
     df["very_long_lead"] = (df["lead_time_hours"] >= 24 * 14).astype(int)
 
+    # ------------------------------
+    # sms / phone features
+    # ------------------------------
     df["sms_lead_missing"] = df["sms_lead_hours"].isna().astype(int)
     df["sms_lead_hours_filled"] = df["sms_lead_hours"].fillna(-1)
     df["sms_possible_but_not_sent"] = ((df["has_phone"] == 1) & (df["sms_sent"] == 0)).astype(int)
     df["sms_sent_x_has_phone"] = (df["sms_sent"] * df["has_phone"]).astype(int)
 
+    # ------------------------------
+    # historical patient features (pre-2025 from patients.csv)
+    # ------------------------------
     df["prior_show_count"] = (df["prior_appt_count"] - df["prior_noshow_count"]).clip(lower=0)
     df["has_prior_history"] = (df["prior_appt_count"] > 0).astype(int)
     df["had_prior_noshow"] = (df["prior_noshow_count"] > 0).astype(int)
-    df["prior_noshow_ratio_safe"] = np.where(
+
+    df["prior_noshow_rate_safe"] = np.where(
         df["prior_appt_count"] > 0,
         df["prior_noshow_count"] / np.maximum(df["prior_appt_count"], 1),
         0.0,
     )
+    df["prior_noshow_ratio_safe"] = df["prior_noshow_rate_safe"]
 
+    # ------------------------------
+    # 2025 cumulative patient history
+    # ------------------------------
+    df["patient_2025_has_history"] = (df["patient_2025_appt_count"] > 0).astype(int)
+    df["patient_2025_show_count"] = (
+        df["patient_2025_appt_count"] - df["patient_2025_noshow_count"]
+    ).clip(lower=0)
+
+    # İstenen dinamik oran
+    df["patient_2025_noshow_rate"] = (
+        df["patient_2025_noshow_count"] / np.maximum(df["patient_2025_appt_count"], 1)
+    )
+    df["patient_2025_noshow_rate_safe"] = df["patient_2025_noshow_rate"]
+
+    # Recency
+    df["has_prev_appt_2025"] = (df["days_since_last_appt"] >= 0).astype(int)
+    df["days_since_last_appt_log1p"] = np.where(
+        df["days_since_last_appt"] >= 0,
+        np.log1p(df["days_since_last_appt"]),
+        -1.0,
+    )
+    df["recent_return_7d"] = (
+        (df["days_since_last_appt"] >= 0) & (df["days_since_last_appt"] <= 7)
+    ).astype(int)
+    df["recent_return_30d"] = (
+        (df["days_since_last_appt"] >= 0) & (df["days_since_last_appt"] <= 30)
+    ).astype(int)
+
+    # ------------------------------
+    # strong numeric interactions
+    # ------------------------------
+    df["prior_noshow_rate_squared"] = df["prior_noshow_rate_safe"] ** 2
+    df["patient_age_x_chronic"] = df["age"] * df["chronic_count"]
+    df["distance_x_age"] = df["distance_km"] * df["age"]
+    df["ses_x_has_phone"] = df["ses_score"] * df["has_phone"]
+
+    df["lead_time_x_no_sms"] = df["lead_time_days"] * (1 - df["sms_sent"])
+    df["noshow_rate_x_lead_time"] = df["prior_noshow_rate_safe"] * df["lead_time_days"]
+    df["distance_x_noshow_rate"] = df["distance_km"] * df["prior_noshow_rate_safe"]
+    df["wait_time_x_noshow"] = df["wait_mins_est"] * df["prior_noshow_rate_safe"]
+
+    # 2025 dynamic history interactions
+    df["patient2025_noshow_x_lead"] = df["patient_2025_noshow_rate"] * df["lead_time_days"]
+    df["patient2025_noshow_x_distance"] = df["patient_2025_noshow_rate"] * df["distance_km"]
+    df["patient2025_noshow_x_wait"] = df["patient_2025_noshow_rate"] * df["wait_mins_est"]
+
+    # Recency interactions
+    df["recency_x_prior_noshow"] = df["days_since_last_appt_log1p"] * df["prior_noshow_rate_safe"]
+    df["recency_x_2025_noshow"] = df["days_since_last_appt_log1p"] * df["patient_2025_noshow_rate"]
+    df["recency_x_distance"] = df["days_since_last_appt_log1p"] * df["distance_km"]
+
+    # ------------------------------
+    # clinic / capacity features
+    # ------------------------------
     df["appt_to_capacity"] = df["clinic_day_appt_count"] / np.maximum(df["capacity_daily"], 1)
     df["appt_minus_capacity"] = df["clinic_day_appt_count"] - df["capacity_daily"]
     df["clinic_load_x_wait"] = df["clinic_load_ratio"] * df["wait_mins_est"]
     df["wait_minus_base"] = df["wait_mins_est"] - df["base_wait_mins_est"]
     df["wait_to_base_ratio"] = df["wait_mins_est"] / np.maximum(df["base_wait_mins_est"], 1)
     df["capacity_x_open_sat"] = df["capacity_daily"] * (1 + df["open_on_saturday"])
+    df["high_load_x_wait"] = (df["clinic_load_ratio"] > 1.0).astype(int) * df["wait_mins_est"]
 
+    # ------------------------------
+    # distance / geo features
+    # ------------------------------
     df["distance_log1p"] = np.log1p(df["distance_km"].clip(lower=0))
     df["distance_x_lead"] = df["distance_km"] * df["lead_time_days"]
     df["distance_x_sms"] = df["distance_km"] * (1 + df["sms_sent"])
@@ -197,6 +295,9 @@ def add_features(df):
     df["abs_lat_gap"] = (df["residence_lat"] - df["clinic_lat"]).abs()
     df["abs_lon_gap"] = (df["residence_lon"] - df["clinic_lon"]).abs()
 
+    # ------------------------------
+    # buckets
+    # ------------------------------
     df["age_bucket"] = pd.cut(
         df["age"],
         bins=[-1, 17, 29, 44, 59, 74, 120],
@@ -232,6 +333,9 @@ def add_features(df):
         if col in df.columns:
             df[col] = df[col].astype(str)
 
+    # ------------------------------
+    # crossed categoricals
+    # ------------------------------
     df["specialty_x_channel"] = df["specialty"].astype(str) + "__" + df["booking_channel"].astype(str)
     df["specialty_x_type"] = df["specialty"].astype(str) + "__" + df["appointment_type"].astype(str)
     df["specialty_x_hour"] = df["specialty"].astype(str) + "__" + df["hour_bucket"].astype(str)
@@ -265,7 +369,6 @@ def get_te_cols(use_clinic_id=True):
     return te_cols
 
 
-
 def apply_target_encoding(train_df, other_df, cols, target=TARGET, smooth=TE_SMOOTH):
     train_df = train_df.copy()
     other_df = other_df.copy()
@@ -275,9 +378,11 @@ def apply_target_encoding(train_df, other_df, cols, target=TARGET, smooth=TE_SMO
     for col in cols:
         if col not in train_df.columns:
             continue
+
         stats = train_df.groupby(col, dropna=False)[target].agg(["sum", "count"])
         stats["te"] = (stats["sum"] + global_mean * smooth) / (stats["count"] + smooth)
         mapper = stats["te"]
+
         new_col = f"te_{col}"
         train_df[new_col] = train_df[col].map(mapper).fillna(global_mean).astype(float)
         other_df[new_col] = other_df[col].map(mapper).fillna(global_mean).astype(float)
@@ -302,8 +407,9 @@ def build_feature_lists(df, use_clinic_id=True):
         "clinic_lat",
         "clinic_lon",
         "sms_lead_hours",
-        "is_cold_start_clinic",  # train side constant; kept outside the model for conditional blend
+        "is_cold_start_clinic",
     ]
+
     if not use_clinic_id:
         drop_cols.append("clinic_id")
         drop_cols += ["clinic_x_hour", "clinic_x_type"]
@@ -334,7 +440,7 @@ def build_feature_lists(df, use_clinic_id=True):
 
 
 # =========================================================
-# FOLDS
+# ROLLING FOLDS
 # =========================================================
 def build_rolling_folds(df, n_folds=N_FOLDS, valid_days=ROLLING_VALID_DAYS, step_days=ROLLING_STEP_DAYS):
     max_date = df[DATE_COL].max()
@@ -349,6 +455,7 @@ def build_rolling_folds(df, n_folds=N_FOLDS, valid_days=ROLLING_VALID_DAYS, step
 
         tr_idx = df.index[train_mask].to_numpy()
         va_idx = df.index[valid_mask].to_numpy()
+
         if len(tr_idx) == 0 or len(va_idx) == 0:
             continue
 
@@ -390,7 +497,6 @@ def build_catboost(params, random_seed=RANDOM_SEED):
     )
 
 
-
 def train_predict_single_model(train_fold, valid_fold, cfg):
     te_cols = get_te_cols(use_clinic_id=cfg["use_clinic_id"])
     train_enc, valid_enc, _ = apply_target_encoding(train_fold, valid_fold, te_cols)
@@ -407,41 +513,12 @@ def train_predict_single_model(train_fold, valid_fold, cfg):
 
     preds = model.predict_proba(valid_pool)[:, 1]
     pred_s = pd.Series(preds, index=valid_sorted.index).sort_index()
+
     best_iter = model.get_best_iteration()
     if best_iter is None or best_iter <= 0:
         best_iter = model.tree_count_
 
     return pred_s, int(best_iter), model, features, cat_features
-
-
-
-def train_predict_segment_model(train_fold, valid_fold, cfg):
-    valid_pred = pd.Series(index=valid_fold.index, dtype=float)
-    best_iters = []
-    models = {}
-    features_used = None
-
-    for appt_type in sorted(valid_fold["appointment_type"].astype(str).unique()):
-        tr_seg = train_fold[train_fold["appointment_type"].astype(str) == appt_type].copy()
-        va_seg = valid_fold[valid_fold["appointment_type"].astype(str) == appt_type].copy()
-        if len(va_seg) == 0:
-            continue
-        if len(tr_seg) == 0:
-            tr_seg = train_fold.copy()
-
-        pred_s, best_iter, model, features, cat_features = train_predict_single_model(tr_seg, va_seg, cfg)
-        valid_pred.loc[pred_s.index] = pred_s.values
-        best_iters.append(best_iter)
-        models[appt_type] = {
-            "model": model,
-            "best_iter": best_iter,
-            "features": features,
-            "cat_features": cat_features,
-        }
-        features_used = features
-
-    valid_pred = valid_pred.fillna(train_fold[TARGET].mean())
-    return valid_pred.sort_index(), best_iters, models, features_used
 
 
 # =========================================================
@@ -462,19 +539,17 @@ def run_oof_training(train_df, folds, model_configs):
             fold_no = fold_info["fold"]
             tr_idx = fold_info["train_idx"]
             va_idx = fold_info["valid_idx"]
+
             tr_fold = train_df.loc[tr_idx].copy()
             va_fold = train_df.loc[va_idx].copy()
 
-            if cfg["segment_by_appt_type"]:
-                pred_s, seg_best_iters, _, _ = train_predict_segment_model(tr_fold, va_fold, cfg)
-                best_iters.extend(seg_best_iters)
-            else:
-                pred_s, best_iter, _, _, _ = train_predict_single_model(tr_fold, va_fold, cfg)
-                best_iters.append(best_iter)
+            pred_s, best_iter, _, _, _ = train_predict_single_model(tr_fold, va_fold, cfg)
+            best_iters.append(best_iter)
 
             oof_pred.loc[pred_s.index] = pred_s.values
             fold_ap = average_precision_score(va_fold[TARGET], pred_s.loc[va_fold.index])
             fold_scores.append(fold_ap)
+
             cv_rows.append(
                 {
                     "model": cfg["name"],
@@ -486,6 +561,7 @@ def run_oof_training(train_df, folds, model_configs):
                     "n_valid": len(va_fold),
                 }
             )
+
             print(
                 f"Fold {fold_no}: AP={fold_ap:.6f} | "
                 f"valid={fold_info['valid_start'].date()} -> {fold_info['valid_end'].date()} | "
@@ -520,13 +596,9 @@ def fit_stackers(oof_frame):
     base_cols_all = [
         "pred_clinic_aware",
         "pred_clinic_agnostic",
-        "pred_hour_bucket_agnostic",
-        "pred_type_segment_agnostic",
     ]
     base_cols_no_clinic = [
         "pred_clinic_agnostic",
-        "pred_hour_bucket_agnostic",
-        "pred_type_segment_agnostic",
     ]
 
     mask_all = oof_frame[base_cols_all].notna().all(axis=1)
@@ -598,30 +670,6 @@ def fit_full_single_model(train_df, test_df, cfg, best_iter):
     return test_pred, model, fi
 
 
-
-def fit_full_segment_model(train_df, test_df, cfg, best_iter):
-    test_pred = pd.Series(index=test_df.index, dtype=float)
-    fi_frames = []
-
-    for appt_type in sorted(test_df["appointment_type"].astype(str).unique()):
-        tr_seg = train_df[train_df["appointment_type"].astype(str) == appt_type].copy()
-        te_seg = test_df[test_df["appointment_type"].astype(str) == appt_type].copy()
-        if len(te_seg) == 0:
-            continue
-        if len(tr_seg) == 0:
-            tr_seg = train_df.copy()
-
-        pred_s, model, fi = fit_full_single_model(tr_seg, te_seg, cfg, best_iter)
-        test_pred.loc[pred_s.index] = pred_s.values
-        fi["segment"] = appt_type
-        fi_frames.append(fi)
-
-    test_pred = test_pred.fillna(train_df[TARGET].mean())
-    fi_all = pd.concat(fi_frames, ignore_index=True) if fi_frames else pd.DataFrame()
-    return test_pred.sort_index(), fi_all
-
-
-
 def fit_all_full_models(train_df, test_df, artifacts):
     pred_frame = pd.DataFrame({ID_COL: test_df[ID_COL]})
     importance_frames = []
@@ -631,11 +679,7 @@ def fit_all_full_models(train_df, test_df, artifacts):
         best_iter = meta["median_best_iter"]
         print(f"\n===== Full fit: {model_name} | iterations={best_iter} =====")
 
-        if cfg["segment_by_appt_type"]:
-            pred_s, fi = fit_full_segment_model(train_df, test_df, cfg, best_iter)
-        else:
-            pred_s, _, fi = fit_full_single_model(train_df, test_df, cfg, best_iter)
-
+        pred_s, _, fi = fit_full_single_model(train_df, test_df, cfg, best_iter)
         pred_frame[f"pred_{model_name}"] = pred_s.values
         importance_frames.append(fi)
 
@@ -659,6 +703,7 @@ def make_final_submission(test_df, sample_sub, pred_frame, stacker_meta):
     cold_mask = test_df["clinic_id"].astype(str).isin(
         set(test_df.loc[test_df["is_cold_start_clinic"] == 1, "clinic_id"].astype(str).unique())
     )
+
     final_pred = np.where(cold_mask.values, pred_cold, pred_known)
     final_pred = np.clip(final_pred, 0.0, 1.0)
 
@@ -669,6 +714,7 @@ def make_final_submission(test_df, sample_sub, pred_frame, stacker_meta):
         validate="1:1",
     )
     submission[TARGET] = submission[TARGET].clip(0, 1)
+
     return submission, pd.DataFrame(
         {
             ID_COL: test_df[ID_COL],
@@ -685,8 +731,12 @@ def make_final_submission(test_df, sample_sub, pred_frame, stacker_meta):
 # =========================================================
 def main():
     train_raw, test_raw, sample_sub = load_data()
-    train_df = add_features(train_raw)
-    test_df = add_features(test_raw)
+
+    # Leakage-safe temporal patient history
+    train_hist, test_hist = add_temporal_patient_history(train_raw, test_raw)
+
+    train_df = add_features(train_hist)
+    test_df = add_features(test_hist)
 
     print("Raw shapes")
     print("train:", train_df.shape)
@@ -696,6 +746,16 @@ def main():
         "Test cold-start clinic share: "
         f"{test_df['is_cold_start_clinic'].mean():.4%} | "
         f"clinics={sorted(test_df.loc[test_df['is_cold_start_clinic'] == 1, 'clinic_id'].unique().tolist())}"
+    )
+    print(
+        "2025 history coverage | "
+        f"train has_history={train_df['patient_2025_has_history'].mean():.4%}, "
+        f"test has_history={test_df['patient_2025_has_history'].mean():.4%}"
+    )
+    print(
+        "recency coverage | "
+        f"train has_prev={train_df['has_prev_appt_2025'].mean():.4%}, "
+        f"test has_prev={test_df['has_prev_appt_2025'].mean():.4%}"
     )
 
     folds = build_rolling_folds(train_df)
