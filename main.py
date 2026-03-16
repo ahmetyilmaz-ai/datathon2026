@@ -33,22 +33,24 @@ TE_SMOOTH = 25.0
 SEED1 = 42
 SEED2 = 2026
 
-OUTPUT_SUB = BASE_DIR / "submission_catboost_mean_blend.csv"
-OUTPUT_OOF = BASE_DIR / "oof_catboost_mean_blend.csv"
-OUTPUT_CV = BASE_DIR / "cv_summary_catboost_mean_blend.csv"
-OUTPUT_IMPORTANCE = BASE_DIR / "feature_importance_catboost_mean_blend.csv"
-OUTPUT_META = BASE_DIR / "blend_metadata_catboost_mean_blend.json"
+OUTPUT_SUB = BASE_DIR / "submission_catboost_mean_blend_gpu.csv"
+OUTPUT_OOF = BASE_DIR / "oof_catboost_mean_blend_gpu.csv"
+OUTPUT_CV = BASE_DIR / "cv_summary_catboost_mean_blend_gpu.csv"
+OUTPUT_IMPORTANCE = BASE_DIR / "feature_importance_catboost_mean_blend_gpu.csv"
+OUTPUT_META = BASE_DIR / "blend_metadata_catboost_mean_blend_gpu.json"
 
 # =========================================================
 # 4 MODEL = 2 BASE MODEL x 2 SEED
+# - Only CatBoost
+# - Simple mean blend
 # =========================================================
 MODEL_CONFIGS = [
     {
         "name": "clinic_aware_seed1",
         "use_clinic_id": True,
         "params": {
-            "iterations": 1000,
-            "learning_rate": 0.05,
+            "iterations": 2000,
+            "learning_rate": 0.03,
             "depth": 6,
             "l2_leaf_reg": 25,
             "min_data_in_leaf": 40,
@@ -61,8 +63,8 @@ MODEL_CONFIGS = [
         "name": "clinic_aware_seed2",
         "use_clinic_id": True,
         "params": {
-            "iterations": 1000,
-            "learning_rate": 0.05,
+            "iterations": 2000,
+            "learning_rate": 0.03,
             "depth": 6,
             "l2_leaf_reg": 25,
             "min_data_in_leaf": 40,
@@ -75,8 +77,8 @@ MODEL_CONFIGS = [
         "name": "clinic_agnostic_seed1",
         "use_clinic_id": False,
         "params": {
-            "iterations": 1000,
-            "learning_rate": 0.05,
+            "iterations": 2000,
+            "learning_rate": 0.03,
             "depth": 6,
             "l2_leaf_reg": 25,
             "min_data_in_leaf": 60,
@@ -89,8 +91,8 @@ MODEL_CONFIGS = [
         "name": "clinic_agnostic_seed2",
         "use_clinic_id": False,
         "params": {
-            "iterations": 1000,
-            "learning_rate": 0.05,
+            "iterations": 2000,
+            "learning_rate": 0.03,
             "depth": 6,
             "l2_leaf_reg": 25,
             "min_data_in_leaf": 60,
@@ -179,7 +181,7 @@ def add_temporal_histories(train_df, test_df):
         combined.groupby("clinic_id")["_known_noshow"].cumsum() - combined["_known_noshow"]
     )
 
-    # Restore chronological order
+    # Back to chronological order
     combined = combined.sort_values([TIME_COL, ID_COL]).reset_index(drop=True)
 
     combined["patient_2025_appt_count"] = combined["patient_2025_appt_count"].astype(np.int32)
@@ -250,10 +252,9 @@ def add_features(df):
 
     # ------------------------------
     # pre-2025 patient history
+    # User-requested formula
     # ------------------------------
     df["prior_show_count"] = (df["prior_appt_count"] - df["prior_noshow_count"]).clip(lower=0)
-
-    # Kullanıcı istediği formül: prior_noshow_count / prior_appt_count.clip(lower=1)
     df["prior_noshow_rate"] = (
         df["prior_noshow_count"].fillna(0) / df["prior_appt_count"].fillna(0).clip(lower=1)
     )
@@ -287,7 +288,7 @@ def add_features(df):
     df["clinic_2025_noshow_rate_safe"] = df["clinic_2025_noshow_rate"]
 
     # ------------------------------
-    # strong numeric interactions
+    # numeric interactions
     # ------------------------------
     df["prior_noshow_rate_squared"] = df["prior_noshow_rate"] ** 2
     df["patient_age_x_chronic"] = df["age"] * df["chronic_count"]
@@ -445,7 +446,7 @@ def build_feature_lists(df, use_clinic_id=True):
         "clinic_lon",
         "sms_lead_hours",
         "is_cold_start_clinic",
-        # explicit removals from feature importance cleanup
+        # removed low-importance / noisy features
         "is_month_start",
         "is_month_end",
         "clinic_2025_has_history",
@@ -537,19 +538,21 @@ def build_rolling_folds(df, n_folds=N_FOLDS, valid_days=ROLLING_VALID_DAYS, step
 def build_catboost(params):
     return CatBoostClassifier(
         loss_function="Logloss",
-        eval_metric="PRAUC:type=Classic",
+        eval_metric="Logloss",
         iterations=params["iterations"],
         learning_rate=params["learning_rate"],
         depth=params["depth"],
         l2_leaf_reg=params["l2_leaf_reg"],
         min_data_in_leaf=params["min_data_in_leaf"],
-        bootstrap_type="Bernoulli",
+        bootstrap_type="Poisson",
         subsample=params.get("subsample", 0.8),
         random_strength=params.get("random_strength", 1.0),
         has_time=True,
         random_seed=params.get("random_seed", SEED1),
         od_type="Iter",
         od_wait=200,
+        task_type="GPU",
+        devices="0",
         verbose=False,
         allow_writing_files=False,
     )
@@ -578,6 +581,9 @@ def train_predict_single_model(train_fold, valid_fold, cfg):
     else:
         best_iter = best_iter + 1
 
+    # Underfit guard
+    best_iter = max(int(best_iter), 500)
+
     fi = pd.DataFrame(
         {
             "model": cfg["name"],
@@ -586,7 +592,7 @@ def train_predict_single_model(train_fold, valid_fold, cfg):
         }
     ).sort_values(["importance", "feature"], ascending=[False, True])
 
-    return pred_s, int(best_iter), model, fi
+    return pred_s, best_iter, model, fi
 
 
 # =========================================================
@@ -636,12 +642,13 @@ def run_oof_training(train_df, folds, model_configs):
             print(
                 f"Fold {fold_no}: AP={fold_ap:.6f} | "
                 f"valid={fold_info['valid_start'].date()} -> {fold_info['valid_end'].date()} | "
-                f"n_train={len(tr_fold):,} n_valid={len(va_fold):,}"
+                f"n_train={len(tr_fold):,} n_valid={len(va_fold):,} | "
+                f"best_iter_used={best_iter}"
             )
 
         overall_mask = oof_pred.notna()
         overall_ap = average_precision_score(train_df.loc[overall_mask, TARGET], oof_pred.loc[overall_mask])
-        median_best_iter = int(np.median(best_iters)) if best_iters else cfg["params"]["iterations"]
+        median_best_iter = max(int(np.median(best_iters)), 500) if best_iters else 500
 
         oof_frame[f"pred_{cfg['name']}"] = oof_pred
         model_artifacts[cfg["name"]] = {
@@ -727,7 +734,7 @@ def fit_full_single_model(train_df, test_df, cfg, best_iter):
     test_sorted = test_enc.sort_values(TIME_COL)
 
     model_params = dict(cfg["params"])
-    model_params["iterations"] = max(best_iter, 200)
+    model_params["iterations"] = max(int(best_iter), 500)
     model = build_catboost(model_params)
 
     train_pool = Pool(train_sorted[features], train_sorted[TARGET], cat_features=cat_features)
@@ -850,7 +857,7 @@ def main():
     blend_meta = evaluate_mean_blend_oof(oof_frame)
 
     pred_frame, fi_full = fit_all_full_models(train_df, test_df, artifacts)
-    submission, extra_pred_frame = make_final_submission(test_df, sample_sub, pred_frame, blend_meta)
+    submission, extra_pred_frame = make_final_submission(test_df, sample_sub, blend_meta=blend_meta, pred_frame=pred_frame)
 
     # Save outputs
     oof_save = blend_meta["oof_frame"]
@@ -870,6 +877,10 @@ def main():
 
     meta_out = {
         "blend_type": "simple_mean",
+        "task_type": "GPU",
+        "devices": "0",
+        "bootstrap_type": "Poisson",
+        "min_forced_iterations": 500,
         "all_model_columns": blend_meta["all_cols"],
         "agnostic_model_columns": blend_meta["agnostic_cols"],
         "oof_ap_all_4_mean": blend_meta["oof_ap_all"],
@@ -881,6 +892,8 @@ def main():
                 "fold_ap_mean": float(v["fold_ap_mean"]),
                 "use_clinic_id": bool(v["config"]["use_clinic_id"]),
                 "random_seed": int(v["config"]["params"]["random_seed"]),
+                "max_iterations": int(v["config"]["params"]["iterations"]),
+                "learning_rate": float(v["config"]["params"]["learning_rate"]),
             }
             for k, v in artifacts.items()
         },

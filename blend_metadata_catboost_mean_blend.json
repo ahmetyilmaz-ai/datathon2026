@@ -1,0 +1,45 @@
+{
+  "blend_type": "simple_mean",
+  "all_model_columns": [
+    "pred_clinic_aware_seed1",
+    "pred_clinic_aware_seed2",
+    "pred_clinic_agnostic_seed1",
+    "pred_clinic_agnostic_seed2"
+  ],
+  "agnostic_model_columns": [
+    "pred_clinic_agnostic_seed1",
+    "pred_clinic_agnostic_seed2"
+  ],
+  "oof_ap_all_4_mean": 0.48983429211523205,
+  "oof_ap_agnostic_2_mean": 0.4898986232704272,
+  "model_artifacts": {
+    "clinic_aware_seed1": {
+      "median_best_iter": 232,
+      "oof_ap": 0.4895065253264906,
+      "fold_ap_mean": 0.48973225515127716,
+      "use_clinic_id": true,
+      "random_seed": 42
+    },
+    "clinic_aware_seed2": {
+      "median_best_iter": 182,
+      "oof_ap": 0.4888499854630762,
+      "fold_ap_mean": 0.48939903947017227,
+      "use_clinic_id": true,
+      "random_seed": 2026
+    },
+    "clinic_agnostic_seed1": {
+      "median_best_iter": 255,
+      "oof_ap": 0.489399802327557,
+      "fold_ap_mean": 0.4897697098338115,
+      "use_clinic_id": false,
+      "random_seed": 42
+    },
+    "clinic_agnostic_seed2": {
+      "median_best_iter": 188,
+      "oof_ap": 0.4897458815510125,
+      "fold_ap_mean": 0.4902618018568902,
+      "use_clinic_id": false,
+      "random_seed": 2026
+    }
+  }
+}
