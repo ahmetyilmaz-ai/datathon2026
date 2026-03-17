@@ -47,6 +47,15 @@ def load_data():
 # =========================================================
 # FEATURES
 # =========================================================
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+    return R * 2 * np.arcsin(np.sqrt(a))
+
+
 def add_features(df):
     df = df.copy()
 
@@ -71,6 +80,14 @@ def add_features(df):
     df["appt_minus_capacity"] = df["clinic_day_appt_count"] - df["capacity_daily"]
     df["clinic_load_x_wait"] = df["clinic_load_ratio"] * df["wait_mins_est"]
 
+    # --- new features ---
+    df["distance_km"] = haversine(
+        df["residence_lat"], df["residence_lon"],
+        df["clinic_lat"], df["clinic_lon"]
+    )
+    df["lead_days"] = (df["appointment_datetime"] - df["booking_datetime"]).dt.days
+    df["prior_noshow_rate"] = df["prior_noshow_count"] / df["prior_appt_count"].clip(lower=1)
+
     cat_cols = ["clinic_id", "specialty", "booking_channel", "appointment_type", "sex", "area_id"]
     for col in cat_cols:
         if col in df.columns:
@@ -83,7 +100,6 @@ def build_feature_lists(df):
     drop_cols = [
         TARGET, ID_COL, "patient_id", TIME_COL, "booking_datetime",
         "appt_date_only", "sms_lead_hours",
-        "residence_lat", "residence_lon", "clinic_lat", "clinic_lon",
     ]
     features = [c for c in df.columns if c not in drop_cols]
 
