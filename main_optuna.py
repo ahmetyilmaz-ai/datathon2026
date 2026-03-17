@@ -121,7 +121,6 @@ def create_objective(train_pool, valid_pool, y_valid):
             "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 10.0),
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
             "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 10, 100),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
         }
 
         model = CatBoostClassifier(
@@ -182,7 +181,6 @@ def fit_full_model(train_df, test_df, best_params, best_iter):
         l2_leaf_reg=best_params["l2_leaf_reg"],
         bagging_temperature=best_params["bagging_temperature"],
         min_data_in_leaf=best_params["min_data_in_leaf"],
-        subsample=best_params["subsample"],
         bootstrap_type="Bayesian",
         has_time=True,
         random_seed=RANDOM_SEED,
