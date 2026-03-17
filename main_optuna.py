@@ -25,7 +25,7 @@ TIME_COL = "appointment_datetime"
 
 VALID_DAYS = 45
 RANDOM_SEED = 42
-N_TRIALS = 30
+N_TRIALS = 1
 
 
 # =========================================================
@@ -244,6 +244,14 @@ def main():
     print(f"{'='*60}")
 
     study = optuna.create_study(direction="maximize", study_name="catboost_prauc")
+    study.enqueue_trial({
+        'iterations': 1156,
+        'learning_rate': 0.03640965735627336,
+        'depth': 6,
+        'l2_leaf_reg': 8.888685198938465,
+        'bagging_temperature': 0.8095050269820508,
+        'min_data_in_leaf': 21,
+    })
     study.optimize(create_objective(train_pool, valid_pool, y_valid), n_trials=N_TRIALS)
 
     best_trial = study.best_trial
