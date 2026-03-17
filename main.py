@@ -79,22 +79,6 @@ def add_features(df, use_clinic_id=True, add_hour_bucket=False):
     df["appt_minus_capacity"] = df["clinic_day_appt_count"] - df["capacity_daily"]
     df["clinic_load_x_wait"] = df["clinic_load_ratio"] * df["wait_mins_est"]
 
-    # Lead time buckets
-    df["lead_short"] = (df["lead_days"] < 3).astype(int)
-    df["lead_long"] = (df["lead_days"] > 30).astype(int)
-
-    # Distance x lead interaction
-    df["distance_x_lead"] = df["distance_km"] * df["lead_days"]
-
-    # Noshow rate x distance
-    df["noshow_x_distance"] = df["prior_noshow_rate"] * df["distance_km"]
-
-    # SMS etkinliği
-    df["sms_x_lead"] = df["sms_sent"] * df["lead_days"]
-
-    # Kapasite baskısı
-    df["overloaded"] = (df["clinic_load_ratio"] > 1.0).astype(int)
-
     if add_hour_bucket:
         df["appt_hour_bucket"] = pd.cut(
             df["appointment_hour"],
@@ -161,12 +145,11 @@ MODEL_CONFIGS = [
         "name": "baseline_4954",
         "use_clinic_id": True,
         "add_hour_bucket": False,
-        "iterations": 3000,
-        "od_wait": 300,
+        "iterations": 2000,
         "learning_rate": 0.03,
-        "depth": 7,
-        "l2_leaf_reg": 5,
-        "min_data_in_leaf": 20,
+        "depth": 6,
+        "l2_leaf_reg": 10,
+        "min_data_in_leaf": 40,
     },
     {
         "name": "regularized_off",
@@ -187,17 +170,6 @@ MODEL_CONFIGS = [
         "depth": 5,
         "l2_leaf_reg": 12,
         "min_data_in_leaf": 60,
-    },
-    {
-        "name": "deep_model",
-        "use_clinic_id": True,
-        "add_hour_bucket": True,
-        "iterations": 3000,
-        "od_wait": 300,
-        "learning_rate": 0.02,
-        "depth": 8,
-        "l2_leaf_reg": 3,
-        "min_data_in_leaf": 15,
     },
 ]
 
@@ -229,7 +201,7 @@ def train_and_eval_one(train_base, cfg):
         devices="0",
         random_seed=RANDOM_SEED,
         od_type="Iter",
-        od_wait=cfg.get("od_wait", 200),
+        od_wait=200,
         verbose=200,
         allow_writing_files=False
     )
