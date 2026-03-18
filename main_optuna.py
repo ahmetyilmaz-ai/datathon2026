@@ -1,7 +1,8 @@
 """
-CatBoost Hyperparameter Optimization with Optuna (GPU)
-======================================================
-30-trial Bayesian search  →  full retrain  →  submission.csv
+CatBoost Hyperparameter Optimization - Standalone Candidate Model (GPU)
+======================================================================
+This script is a standalone model candidate generator, NOT just a tuner for main.py.
+30-trial Bayesian search  →  full retrain on all data  →  submission_optuna_best.csv
 """
 
 import numpy as np
@@ -13,6 +14,8 @@ from sklearn.metrics import average_precision_score
 # =========================================================
 # CONFIG
 # =========================================================
+# NOTE: This script is a standalone single-model candidate generator, 
+# not just a tuner for main.py. It runs 30 trials and saves the best model's submission.
 TRAIN_PATH = "appointments_train.csv"
 TEST_PATH = "appointments_test.csv"
 PATIENTS_PATH = "patients.csv"
@@ -25,7 +28,8 @@ TIME_COL = "appointment_datetime"
 
 VALID_DAYS = 45
 RANDOM_SEED = 42
-N_TRIALS = 1
+N_TRIALS = 30
+
 
 
 # =========================================================
@@ -280,8 +284,8 @@ def main():
         validate="1:1",
     )
     submission["label_noshow"] = submission["label_noshow"].clip(0, 1)
-    submission.to_csv("submission.csv", index=False)
-    print(f"\nSubmission saved: submission.csv  ({len(submission)} rows)")
+    submission.to_csv("submission_optuna_best.csv", index=False)
+    print(f"\nSubmission saved: submission_optuna_best.csv  ({len(submission)} rows)")
     print(submission.head())
 
     # --- feature importance ---
