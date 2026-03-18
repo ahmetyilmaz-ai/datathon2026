@@ -217,34 +217,53 @@ def train_and_eval_one(train_base, cfg):
 # =========================================================
 def search_blend(results):
     y = results[0]["y_valid"]
+    names = ["baseline_4954", "regularized_off", "hour_bucket_reg_off"]
     pred_map = {r["name"]: r["valid_pred"] for r in results}
 
-    best = None
-    best_ap = -1
+    def _eval_grid(grid_vals):
+        """Evaluate all weight combos that sum to 1; return sorted (top-first) list."""
+        combos = []
+        for w1, w2, w3 in product(grid_vals, grid_vals, grid_vals):
+            if abs(w1 + w2 + w3 - 1.0) > 1e-9:
+                continue
+            blend = w1 * pred_map[names[0]] + w2 * pred_map[names[1]] + w3 * pred_map[names[2]]
+            ap = average_precision_score(y, blend)
+            combos.append(({names[0]: w1, names[1]: w2, names[2]: w3}, ap))
+        combos.sort(key=lambda x: x[1], reverse=True)
+        return combos
 
-    grid = np.arange(0, 1.01, 0.1)
+    # --- Stage 1: coarse grid (step=0.1) ---
+    coarse_grid = np.arange(0, 1.01, 0.1)
+    coarse_combos = _eval_grid(coarse_grid)
+    coarse_best_w, coarse_best_ap = coarse_combos[0]
 
-    for w1, w2, w3 in product(grid, grid, grid):
-        s = w1 + w2 + w3
-        if abs(s - 1.0) > 1e-9:
+    print(f"  Coarse best AP: {coarse_best_ap:.6f}  weights: {coarse_best_w}")
+
+    # --- Stage 2: fine grid (step=0.02) around coarse best ---
+    fine_grids = {}
+    for name in names:
+        center = coarse_best_w[name]
+        lo = max(0.0, center - 0.10)
+        hi = min(1.0, center + 0.10)
+        fine_grids[name] = np.arange(lo, hi + 0.001, 0.02)
+
+    fine_combos = []
+    for w1, w2, w3 in product(fine_grids[names[0]], fine_grids[names[1]], fine_grids[names[2]]):
+        if abs(w1 + w2 + w3 - 1.0) > 1e-9:
             continue
-
-        blend = (
-            w1 * pred_map["baseline_4954"] +
-            w2 * pred_map["regularized_off"] +
-            w3 * pred_map["hour_bucket_reg_off"]
-        )
+        blend = w1 * pred_map[names[0]] + w2 * pred_map[names[1]] + w3 * pred_map[names[2]]
         ap = average_precision_score(y, blend)
+        fine_combos.append(({names[0]: round(w1, 2), names[1]: round(w2, 2), names[2]: round(w3, 2)}, ap))
 
-        if ap > best_ap:
-            best_ap = ap
-            best = {
-                "baseline_4954": round(w1, 2),
-                "regularized_off": round(w2, 2),
-                "hour_bucket_reg_off": round(w3, 2),
-            }
+    fine_combos.sort(key=lambda x: x[1], reverse=True)
 
-    return best, best_ap
+    # top-5 report
+    print("  Top-5 fine blend combinations:")
+    for i, (w, ap) in enumerate(fine_combos[:5]):
+        print(f"    #{i+1}  AP={ap:.6f}  {w}")
+
+    best_w, best_ap = fine_combos[0]
+    return best_w, best_ap
 
 
 # =========================================================
@@ -319,6 +338,10 @@ def main():
     print("Best blend weights:", best_weights)
     print(f"Best blend AP: {best_blend_ap:.6f}")
 
+    # Fixed fine blend weights (validated via two-stage coarse-to-fine search)
+    FINE_W = {"baseline_4954": 0.28, "regularized_off": 0.64, "hour_bucket_reg_off": 0.08}
+    names = list(FINE_W.keys())
+
     # full fit
     pred_dict = {}
     test_sorted_ref = None
@@ -333,7 +356,7 @@ def main():
             best_iter=res["best_iter"]
         )
         pred_dict[res["name"]] = test_pred
-        test_sorted_ref = test_sorted  # hepsi aynı sıralamada
+        test_sorted_ref = test_sorted
 
         fi = pd.DataFrame({
             "model": res["name"],
@@ -342,12 +365,8 @@ def main():
         }).sort_values("importance", ascending=False)
         fi_frames.append(fi)
 
-    # final blend
-    final_test_pred = (
-        best_weights["baseline_4954"] * pred_dict["baseline_4954"] +
-        best_weights["regularized_off"] * pred_dict["regularized_off"] +
-        best_weights["hour_bucket_reg_off"] * pred_dict["hour_bucket_reg_off"]
-    )
+    # final blend — raw weighted
+    final_test_pred = sum(FINE_W[n] * pred_dict[n] for n in names)
 
     submission = sample_sub[[ID_COL]].merge(
         test_sorted_ref[[ID_COL]].assign(label_noshow=final_test_pred),
@@ -356,9 +375,9 @@ def main():
         validate="1:1"
     )
     submission["label_noshow"] = submission["label_noshow"].clip(0, 1)
-    submission.to_csv("submission_blended_best.csv", index=False)
+    submission.to_csv("submission_raw_blend.csv", index=False)
 
-    print("\nSubmission kaydedildi: submission_blended_best.csv")
+    print("\nSubmission kaydedildi: submission_raw_blend.csv")
     print(submission.head())
 
     fi_all = pd.concat(fi_frames, axis=0, ignore_index=True)
