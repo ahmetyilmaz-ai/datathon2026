@@ -7,7 +7,12 @@ appointments_test.csv
 
 # Generated outputs
 oof_base_predictions.csv
+oof_*.csv
 submission_*.csv
+submission.csv
+cv_summary*.csv
+optuna_trials.csv
+koray_*.csv
 
 # Feature importance (generated)
 feature_importance_*.csv
