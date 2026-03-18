@@ -65,17 +65,43 @@ def add_features(df, use_clinic_id=True, add_hour_bucket=False):
     df["clinic_load_x_wait"] = df["clinic_load_ratio"] * df["wait_mins_est"]
 
     if add_hour_bucket:
+        appt_hour = df["appointment_hour"]
+
+        # binary time-of-day indicators
+        df["appt_is_morning"] = appt_hour.between(6, 11).astype(int)
+        df["appt_is_afternoon"] = appt_hour.between(12, 16).astype(int)
+        df["appt_is_evening"] = appt_hour.between(17, 21).astype(int)
+
+        # hour bucket (categorical)
         df["appt_hour_bucket"] = pd.cut(
-            df["appointment_hour"],
-            bins=[-1, 8, 11, 14, 17, 23],
-            labels=["very_early", "morning", "noon", "afternoon", "late"]
+            appt_hour,
+            bins=[-1, 7, 11, 16, 20, 23],
+            labels=["early_morning", "morning", "afternoon", "evening", "night"],
         ).astype(str)
+
+        # lead days bucket (categorical)
+        lead_days = (df["appointment_datetime"] - df["booking_datetime"]).dt.total_seconds() / 86400
+        lead_days = lead_days.clip(lower=0)
+        df["lead_days_bucket"] = pd.cut(
+            lead_days,
+            bins=[-1, 1, 3, 7, 14, 30, 9999],
+            labels=["0-1", "2-3", "4-7", "8-14", "15-30", "31+"],
+        ).astype(str)
+
+        # interaction features (categorical)
+        appt_dow_str = df["appointment_dow"].astype(str)
+        df["weekday_hour_bucket"] = appt_dow_str + "_" + df["appt_hour_bucket"]
+        df["lead_hour_bucket"] = df["lead_days_bucket"] + "_" + df["appt_hour_bucket"]
+
+        # numeric interaction
+        df["booking_to_appt_hour_gap"] = (appt_hour - df["booking_hour"]).abs()
 
     cat_cols = ["specialty", "booking_channel", "appointment_type", "sex", "area_id"]
     if use_clinic_id:
         cat_cols = ["clinic_id"] + cat_cols
     if add_hour_bucket:
-        cat_cols.append("appt_hour_bucket")
+        cat_cols.extend(["appt_hour_bucket", "lead_days_bucket",
+                         "weekday_hour_bucket", "lead_hour_bucket"])
 
     for col in cat_cols:
         if col in df.columns:
@@ -99,8 +125,9 @@ def build_feature_lists(df, use_clinic_id=True):
     cat_features = ["specialty", "booking_channel", "appointment_type", "sex", "area_id"]
     if use_clinic_id:
         cat_features = ["clinic_id"] + cat_features
-    if "appt_hour_bucket" in features:
-        cat_features.append("appt_hour_bucket")
+    for col in ["appt_hour_bucket", "lead_days_bucket", "weekday_hour_bucket", "lead_hour_bucket"]:
+        if col in features:
+            cat_features.append(col)
 
     cat_features = [c for c in cat_features if c in features]
     return features, cat_features
@@ -339,7 +366,7 @@ def main():
     print(f"Best blend AP: {best_blend_ap:.6f}")
 
     # Fixed fine blend weights (validated via two-stage coarse-to-fine search)
-    FINE_W = {"baseline_4954": 0.28, "regularized_off": 0.64, "hour_bucket_reg_off": 0.08}
+    FINE_W = {"baseline_4954": 0.12, "regularized_off": 0.54, "hour_bucket_reg_off": 0.34}
     names = list(FINE_W.keys())
 
     # full fit
