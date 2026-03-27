@@ -3,6 +3,7 @@
   "task_type": "GPU",
   "devices": "0",
   "bootstrap_type": "Poisson",
+  "eval_metric_for_early_stopping": "Logloss",
   "min_forced_iterations": 500,
   "all_model_columns": [
     "pred_clinic_aware_seed1",
@@ -14,43 +15,47 @@
     "pred_clinic_agnostic_seed1",
     "pred_clinic_agnostic_seed2"
   ],
-  "oof_ap_all_4_mean": 0.4896780189871286,
-  "oof_ap_agnostic_2_mean": 0.4895582791796833,
+  "oof_ap_all_4_mean": 0.48969199119178924,
+  "oof_ap_agnostic_2_mean": 0.489553149363523,
   "model_artifacts": {
     "clinic_aware_seed1": {
       "median_best_iter": 500,
-      "oof_ap": 0.4891908495871051,
-      "fold_ap_mean": 0.4895277762277045,
+      "median_raw_best_iter": 411,
+      "oof_ap": 0.48922909167077966,
+      "fold_ap_mean": 0.4895568095181436,
       "use_clinic_id": true,
       "random_seed": 42,
-      "max_iterations": 2000,
+      "max_iterations": 3000,
       "learning_rate": 0.03
     },
     "clinic_aware_seed2": {
       "median_best_iter": 500,
-      "oof_ap": 0.4895316581857104,
-      "fold_ap_mean": 0.4897576552934811,
+      "median_raw_best_iter": 365,
+      "oof_ap": 0.48949865576991725,
+      "fold_ap_mean": 0.48972214569520023,
       "use_clinic_id": true,
       "random_seed": 2026,
-      "max_iterations": 2000,
+      "max_iterations": 3000,
       "learning_rate": 0.03
     },
     "clinic_agnostic_seed1": {
       "median_best_iter": 500,
-      "oof_ap": 0.48941112828274264,
-      "fold_ap_mean": 0.4898092860461234,
+      "median_raw_best_iter": 436,
+      "oof_ap": 0.48938898351597276,
+      "fold_ap_mean": 0.48978523174707833,
       "use_clinic_id": false,
       "random_seed": 42,
-      "max_iterations": 2000,
+      "max_iterations": 3000,
       "learning_rate": 0.03
     },
     "clinic_agnostic_seed2": {
       "median_best_iter": 500,
-      "oof_ap": 0.4894162148557012,
-      "fold_ap_mean": 0.4897928547110523,
+      "median_raw_best_iter": 359,
+      "oof_ap": 0.4894310430949344,
+      "fold_ap_mean": 0.4897988022760484,
       "use_clinic_id": false,
       "random_seed": 2026,
-      "max_iterations": 2000,
+      "max_iterations": 3000,
       "learning_rate": 0.03
     }
   }
